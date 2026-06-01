@@ -1,0 +1,7 @@
+# nunca versionar segredos
+*.key
+*token*
+*secret*
+.env
+__pycache__/
+*.pyc
