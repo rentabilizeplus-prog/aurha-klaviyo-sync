@@ -1,0 +1,26 @@
+name: Sync Shopify -> Mautic (LTV/RFM)
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'   # a cada 2 horas
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Rodar sincronização Mautic
+        env:
+          SHOP_DOMAIN: artesanatoholistico.myshopify.com
+          SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          MAUTIC_BASE: ${{ secrets.MAUTIC_BASE }}
+          MAUTIC_USER: ${{ secrets.MAUTIC_USER }}
+          MAUTIC_PASS: ${{ secrets.MAUTIC_PASS }}
+          LOOKBACK_HOURS: '3'
+        run: python mautic_sync.py
