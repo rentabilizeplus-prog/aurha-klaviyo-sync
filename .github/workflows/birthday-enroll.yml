@@ -1,0 +1,32 @@
+name: Aniversariantes -> Mautic (F3)
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # diario ~06:00 BRT
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (nao altera nada)'
+        type: choice
+        options: ['true','false']
+        default: 'true'
+
+jobs:
+  enroll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Enroll aniversariantes (D-30) / limpa (D+4)
+        env:
+          MAUTIC_BASE: ${{ secrets.MAUTIC_BASE }}
+          MAUTIC_USER: ${{ secrets.MAUTIC_USER }}
+          MAUTIC_PASS: ${{ secrets.MAUTIC_PASS }}
+          BIRTHDAY_SEGMENT_ID: '530'
+          LEAD_DAYS: '30'
+          GRACE_DAYS: '4'
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.dry_run }}
+        run: python birthday_enroll.py
