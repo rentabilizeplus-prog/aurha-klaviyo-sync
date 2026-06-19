@@ -1,4 +1,4 @@
-name: Rede de seguranca Quiz -> Mautic (segmento 533)
+name: Rede de seguranca Quiz -> Mautic (segmento 536 / funil v2)
 
 on:
   schedule:
@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Reconciliar planilha do quiz com o segmento 533
+      - name: Reconciliar planilha do quiz com o segmento 536 (so leads pos-corte)
         env:
           MAUTIC_BASE: ${{ secrets.MAUTIC_BASE }}
           MAUTIC_USER: ${{ secrets.MAUTIC_USER }}

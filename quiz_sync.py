@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Rede de seguranca: reconcilia a planilha do quiz (CSV publico) com o segmento 533 do Mautic.
+Rede de seguranca: reconcilia a planilha do quiz (CSV publico) com o segmento da v2 (536) do Mautic.
 - A integracao principal e Lovable -> Mautic (form id 1, tempo real). Este job (1x/h via
-  GitHub Actions) so PEGA O QUE ESCAPOU: leads com e-mail na planilha que ainda nao estao no 533.
-- Eficiente/stateless: o proprio segmento 533 e o estado. So upserta + adiciona quem falta.
+  GitHub Actions) so PEGA O QUE ESCAPOU: leads com e-mail na planilha que ainda nao estao no 536.
+- Eficiente/stateless: o proprio segmento e o estado. So upserta + adiciona quem falta.
   Nunca remove ninguem de lugar nenhum.
+
+CORTE v2 (funil novo so p/ leads NOVAS): a partir do QUIZ_CUTOVER, leads novas vao p/ o
+segmento 536 (funil v2 / campanha 74). So reconcilia leads com data_criacao >= QUIZ_CUTOVER,
+pra NAO arrastar as leads historicas (que estao no funil antigo, seg 533 / camp 68) pro novo.
 
 Credenciais via env (GitHub Secrets): MAUTIC_BASE, MAUTIC_USER, MAUTIC_PASS
 (fallback local: ~/.mautic_user / ~/.mautic_pass)
+Vars opcionais: QUIZ_SEGMENT_ID, QUIZ_SEGMENT_ALIAS, QUIZ_CUTOVER (ISO8601), QUIZ_DRY=1.
 """
 import os, re, csv, io, json, time, base64, urllib.request, urllib.error, urllib.parse
 
@@ -26,8 +31,11 @@ MP = _cred("MAUTIC_PASS", "~/.mautic_pass")
 MHDR = {"Authorization": "Basic " + base64.b64encode(f"{MU}:{MP}".encode()).decode(),
         "Content-Type": "application/json"}
 
-SEGMENT_ID = int(os.environ.get("QUIZ_SEGMENT_ID", "533"))
-SEGMENT_ALIAS = os.environ.get("QUIZ_SEGMENT_ALIAS", "quiz-pulseira-lovable")
+SEGMENT_ID = int(os.environ.get("QUIZ_SEGMENT_ID", "536"))
+SEGMENT_ALIAS = os.environ.get("QUIZ_SEGMENT_ALIAS", "quiz-pulseira-v2-lovable")
+# So reconcilia leads criadas a partir do corte (data_criacao >= CUTOVER). ISO8601 lexicografico.
+CUTOVER = os.environ.get("QUIZ_CUTOVER", "2026-06-19T15:55:00Z")
+DRY = os.environ.get("QUIZ_DRY", "") not in ("", "0", "false", "False")
 SHEET_ID = os.environ.get("QUIZ_SHEET_ID", "1LgVOZP6gL1Qf1eMOLzp7SbRipD6TNk3_oZOUB9dMG2Q")
 SHEET_GID = os.environ.get("QUIZ_SHEET_GID", "448553860")
 CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={SHEET_GID}"
@@ -59,6 +67,11 @@ def fetch_sheet_leads():
         def g(c): return (rec.get(c) or "").strip()
         m = EMAIL_RE.search(g("etapa_05_contato_email"))
         if not m:
+            continue
+        # CORTE: so leads criadas a partir do cutover (funil v2). Historicas e sem-data ficam
+        # de fora (a captacao em tempo real, form id=1, ja carimba data_criacao nas leads novas).
+        created = g("data_criacao")
+        if not created or created < CUTOVER:
             continue
         email = m.group(1).lower()
         dob = ""
@@ -110,7 +123,10 @@ def main():
     sheet = fetch_sheet_leads()
     in_seg = segment_emails()
     missing = [e for e in sheet if e not in in_seg]
-    print(f"planilha: {len(sheet)} e-mails | no segmento {SEGMENT_ID}: {len(in_seg)} | faltando: {len(missing)}")
+    print(f"planilha (>= {CUTOVER}): {len(sheet)} e-mails | no segmento {SEGMENT_ID}: {len(in_seg)} | faltando: {len(missing)}")
+    if DRY:
+        print("DRY-RUN: nao escreve nada. Faltando:", missing[:20], ("..." if len(missing) > 20 else ""))
+        return
     added = fail = 0
     for email in missing:
         lead = {k: v for k, v in sheet[email].items() if v}
