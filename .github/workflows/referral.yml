@@ -1,4 +1,4 @@
-name: Indique-e-Ganhe -> Mautic/Yampi
+name: Programa de Embaixadoras -> cashback (Shopify/Yampi/Mautic)
 
 on:
   schedule:
@@ -10,6 +10,11 @@ on:
         type: choice
         options: ['true','false']
         default: 'true'
+
+# GATE DE LANCAMENTO: enquanto GO_LIVE!='true', o schedule roda em DRY_RUN (nao credita/envia).
+# Para ligar de verdade: trocar GO_LIVE para 'true' abaixo (ou rodar manualmente com dry_run=false).
+env:
+  GO_LIVE: 'false'
 
 jobs:
   referral:
@@ -28,10 +33,13 @@ jobs:
           YAMPI_ALIAS: ${{ secrets.YAMPI_ALIAS }}
           YAMPI_TOKEN: ${{ secrets.YAMPI_TOKEN }}
           YAMPI_SECRET: ${{ secrets.YAMPI_SECRET }}
-          REWARD_AMOUNT: '20'
-          CASHBACK_DAYS: '90'
+          SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          REWARD_PCT: '15'
+          CASHBACK_DAYS: ''          # vazio = cashback SEM validade
           REWARD_EMAIL_ID: '158'
-          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.dry_run }}
+          # No schedule so credita se GO_LIVE=='true'; caso contrario roda DRY. Manual usa o input.
+          DRY_RUN: ${{ github.event_name == 'schedule' && (env.GO_LIVE == 'true' && 'false' || 'true') || github.event.inputs.dry_run }}
         run: python referral_processor.py
       - name: Commit state (dedupe)
         if: github.event_name == 'schedule'
