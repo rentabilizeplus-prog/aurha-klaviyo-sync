@@ -9,6 +9,9 @@ Credenciais via env (GitHub Secrets): MAUTIC_BASE, MAUTIC_USER, MAUTIC_PASS.
 import os, base64, json, time, urllib.request, urllib.error, datetime
 MBASE=os.environ["MAUTIC_BASE"].rstrip("/"); MU=os.environ["MAUTIC_USER"]; MP=os.environ["MAUTIC_PASS"]
 SEG=int(os.environ.get("BIRTHDAY_SEGMENT_ID","530"))
+# Varre so quem TEM data de nascimento (segmento helper ~15k) em vez da base inteira (~114k):
+# offset raso evita o HTTP 500 do Mautic na paginacao profunda.
+HELPER=os.environ.get("BIRTHDAY_HELPER_SEGMENT","tem-data-nascimento")
 LEAD=int(os.environ.get("LEAD_DAYS","30")); GRACE=int(os.environ.get("GRACE_DAYS","4"))
 DRY=os.environ.get("DRY_RUN","false").lower()=="true"
 AUTH=base64.b64encode(f"{MU}:{MP}".encode()).decode()
@@ -31,8 +34,8 @@ rem_md=(today-datetime.timedelta(days=GRACE)).strftime("%m-%d")
 print(f"[birthday] today={today} add_md={add_md} rem_md={rem_md} seg={SEG} dry={DRY}",flush=True)
 add_ids=[]; rem_ids=[]; start=0; total=None; scanned=0; withdob=0
 while True:
-    d=http(f"{MBASE}/api/contacts?limit=1000&start={start}&minimal=false")
-    if total is None: total=int(d.get("total") or 0); print(f"[birthday] total contatos={total}",flush=True)
+    d=http(f"{MBASE}/api/contacts?search=segment:{HELPER}&limit=1000&start={start}&minimal=false")
+    if total is None: total=int(d.get("total") or 0); print(f"[birthday] contatos c/ data (seg {HELPER})={total}",flush=True)
     cs=d.get("contacts",{}); cs=list(cs.values()) if isinstance(cs,dict) else cs
     if not cs: break
     for c in cs:
