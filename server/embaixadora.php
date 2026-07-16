@@ -76,7 +76,16 @@ foreach ($events as $ev) {
   $mobile= $f['mobile'] ?? ($sub['results']['mobile'] ?? '');
   $code  = $f['referral_code'] ?? '';
 
-  /* 4. idempotencia + geracao do cupom */
+  /* helper: confirma que o cupom existe MESMO na Yampi (salvaguarda anti "e-mail sem cupom") */
+  $coupon_exists = function($CFG,$code){
+    list($gs,$gr) = yampi($CFG,'/pricing/promocodes?q='.urlencode($code).'&limit=5');
+    foreach (($gr['data'] ?? []) as $c) { if (strtoupper($c['code'] ?? '')===strtoupper($code)) return true; }
+    return false;
+  };
+
+  /* 4. idempotencia + geracao do cupom (COM verificacao) */
+  $coupon_ok = false;
+  $ip = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? '';
   if (!$code) {
     $base = slug_nome($first); if ($base==='') $base='AMIGA';
     $code = $base.$cid;
@@ -87,12 +96,24 @@ foreach ($events as $ev) {
       'start_at'=>date('Y-m-d H:i:s'),'end_at'=>'2099-12-31 23:59:59',
     ];
     list($cs,$cr) = yampi($CFG,'/pricing/promocodes',$coupon,'POST');
-    if ($cs>=200 && $cs<300) { logline("cupom criado $code (contato $cid) HTTP $cs"); }
-    else { logline("ERRO ao criar cupom $code HTTP $cs ".json_encode($cr)); /* segue: pode ja existir */ }
-  } else { logline("contato $cid ja tinha referral_code=$code (idempotente)"); }
+    $coupon_ok = ($cs>=200 && $cs<300);
+    if (!$coupon_ok) { $coupon_ok = $coupon_exists($CFG,$code); }  // pode ja existir de tentativa anterior
+    logline($coupon_ok ? "cupom $code pronto (contato $cid) HTTP $cs" : "ERRO cupom $code HTTP $cs ".json_encode($cr));
+  } else {
+    $coupon_ok = $coupon_exists($CFG,$code);  // ja tinha code: confirma o cupom na Yampi antes de reusar
+    logline("contato $cid ja tinha referral_code=$code (cupom ".($coupon_ok?"ok":"NAO encontrado").")");
+  }
 
-  /* 5. grava no contato + segmento */
-  $ip = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? '';
+  /* SALVAGUARDA: sem cupom valido -> NAO grava code, NAO envia. Marca p/ follow-up. */
+  if (!$coupon_ok || !$code) {
+    mautic($CFG,"/api/contacts/$cid/edit",[
+      'embaixadora_status'=>'pendente_cupom','aceite_data'=>date('Y-m-d H:i:s'),'aceite_ip'=>$ip,
+    ],'PATCH');
+    logline("contato $cid SEM cupom valido -> status=pendente_cupom, NADA enviado");
+    continue;
+  }
+
+  /* 5. grava no contato + segmento (so com cupom valido) */
   mautic($CFG,"/api/contacts/$cid/edit",[
     'referral_code'=>$code,'referral_discount'=>(int)$CFG['FRIEND_DISCOUNT'],
     'embaixadora_status'=>'ativa','aceite_data'=>date('Y-m-d H:i:s'),'aceite_ip'=>$ip,
