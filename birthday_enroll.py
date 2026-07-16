@@ -6,7 +6,7 @@ A cada execucao:
   - REMOVE do segmento quem fez aniversario ha GRACE_DAYS (default 4) -> ja terminou a jornada, libera p/ reentrar no ano seguinte (campanha tem allowRestart).
 Credenciais via env (GitHub Secrets): MAUTIC_BASE, MAUTIC_USER, MAUTIC_PASS.
 """
-import os, base64, json, urllib.request, urllib.error, datetime
+import os, base64, json, time, urllib.request, urllib.error, datetime
 MBASE=os.environ["MAUTIC_BASE"].rstrip("/"); MU=os.environ["MAUTIC_USER"]; MP=os.environ["MAUTIC_PASS"]
 SEG=int(os.environ.get("BIRTHDAY_SEGMENT_ID","530"))
 LEAD=int(os.environ.get("LEAD_DAYS","30")); GRACE=int(os.environ.get("GRACE_DAYS","4"))
@@ -15,7 +15,16 @@ AUTH=base64.b64encode(f"{MU}:{MP}".encode()).decode()
 HDR={"Authorization":f"Basic {AUTH}","Accept":"application/json","Content-Type":"application/json"}
 def http(url,method="GET",data=None,timeout=120):
     req=urllib.request.Request(url,data=(json.dumps(data).encode() if data is not None else None),headers=HDR,method=method)
-    with urllib.request.urlopen(req,timeout=timeout) as r: return json.load(r)
+    for a in range(6):
+        try:
+            with urllib.request.urlopen(req,timeout=timeout) as r: return json.load(r)
+        except urllib.error.HTTPError as e:
+            # Mautic (t3.medium) retorna 500 na paginacao profunda da base grande: backoff e tenta de novo
+            if e.code in (429,500,502,503) and a<5: time.sleep(3+a*3); continue
+            raise
+        except urllib.error.URLError:
+            if a<5: time.sleep(3+a*3); continue
+            raise
 today=datetime.date.today()
 add_md=(today+datetime.timedelta(days=LEAD)).strftime("%m-%d")
 rem_md=(today-datetime.timedelta(days=GRACE)).strftime("%m-%d")
