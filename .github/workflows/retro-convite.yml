@@ -1,0 +1,42 @@
+name: Embaixadoras - Convite Retroativo (A/B)
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dry (so mostra) | audit | go-live (ENVIA ate DAILY_CAP)'
+        type: choice
+        options: ['dry','audit','go-live']
+        default: 'dry'
+jobs:
+  retro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Rodar
+        env:
+          MAUTIC_BASE: ${{ secrets.MAUTIC_BASE }}
+          MAUTIC_USER: ${{ secrets.MAUTIC_USER }}
+          MAUTIC_PASS: ${{ secrets.MAUTIC_PASS }}
+          YAMPI_ALIAS: ${{ secrets.YAMPI_ALIAS }}
+          YAMPI_TOKEN: ${{ secrets.YAMPI_TOKEN }}
+          YAMPI_SECRET: ${{ secrets.YAMPI_SECRET }}
+          SHOPIFY_CLIENT_ID: ${{ secrets.SHOPIFY_CLIENT_ID }}
+          SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
+          CONVITE_EMAIL_A: '198'
+          CONVITE_EMAIL_B: '199'
+          DAILY_CAP: '1000'
+        run: |
+          case "${{ github.event.inputs.mode }}" in
+            audit)   python retro_convite.py --audit 40 ;;
+            go-live) python retro_convite.py --go-live ;;
+            *)       python retro_convite.py ;;
+          esac
+      - name: Commit state
+        if: github.event.inputs.mode == 'go-live'
+        run: |
+          git config user.name "Aurha CRM"; git config user.email "rentabilizeplus@gmail.com"
+          git add retro_state.json || true
+          git commit -m "retro: state [skip ci]" || echo "sem mudancas"; git push || echo "push falhou"
