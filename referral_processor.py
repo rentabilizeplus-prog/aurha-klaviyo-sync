@@ -19,7 +19,12 @@ def m(path,data=None,method="GET"):
     with urllib.request.urlopen(req,timeout=90) as r: return json.load(r)
 def y(path):
     req=urllib.request.Request(f"https://api.dooki.com.br/v2/{AL}{path}",headers={"User-Token":YT,"User-Secret-Key":YS,"Accept":"application/json"})
-    with urllib.request.urlopen(req,timeout=90) as r: return json.load(r)
+    try:
+        with urllib.request.urlopen(req,timeout=90) as r: return json.load(r)
+    except (urllib.error.HTTPError,urllib.error.URLError) as e:
+        # Cupom inexistente / secrets ausentes / Yampi fora do ar: nao derruba o job (roda no-op)
+        print(f"[referral] aviso: Yampi GET {path} falhou ({e}) -> ignorando",flush=True)
+        return {}
 def ypost(path,body):
     req=urllib.request.Request(f"https://api.dooki.com.br/v2/{AL}{path}",data=json.dumps(body).encode(),
         headers={"User-Token":YT,"User-Secret-Key":YS,"Content-Type":"application/json","Accept":"application/json"},method="POST")
@@ -34,10 +39,14 @@ def coupon_users(cid):
     d=y(f"/pricing/promocodes/{cid}/customers")
     return [ (u.get("email") or "").lower() for u in d.get("data",[]) if u.get("email") ]
 def friend_is_paying(email):
-    d=m(f"/api/contacts?search="+urllib.parse.quote(f"email:{email}")+"&limit=1")
-    cs=list(d.get("contacts",{}).values())
-    if not cs: return False
-    return (cs[0]["fields"]["all"].get("customer_type")=="Cliente")
+    try:
+        d=m(f"/api/contacts?search="+urllib.parse.quote(f"email:{email}")+"&limit=1")
+        cs=list(d.get("contacts",{}).values())
+        if not cs: return False
+        return (cs[0]["fields"]["all"].get("customer_type")=="Cliente")
+    except Exception as e:
+        print(f"[referral] aviso: checagem Mautic de {email} falhou ({e}) -> ignorando",flush=True)
+        return False
 def reward(referrer_email):
     body={"customer_email":referrer_email,"transaction_type":"credit","amount":REWARD,
           "expires_at":(datetime.date.today()+datetime.timedelta(days=CBDAYS)).strftime("%Y-%m-%d"),
