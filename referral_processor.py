@@ -136,7 +136,8 @@ for cid,remail,code in refs:
                 cont=m(f"/api/contacts/{cid}").get("contact",{}).get("fields",{}).get("all",{})
                 cnt=int(float(cont.get("referral_count") or 0))+1
                 earn=round(float(cont.get("referral_earned") or 0)+reward,2)
-                m(f"/api/contacts/{cid}/edit",{"referral_count":cnt,"referral_earned":earn},"PATCH")
+                # referral_last_reward alimenta o {contactfield=referral_last_reward} do e-mail 158
+                m(f"/api/contacts/{cid}/edit",{"referral_count":cnt,"referral_earned":earn,"referral_last_reward":round(reward,2)},"PATCH")
                 if REWARD_EMAIL_ID:
                     try: m(f"/api/emails/{REWARD_EMAIL_ID}/contact/{cid}/send",{},"POST")
                     except Exception as e: print("    aviso: falha no e-mail de recompensa",e,flush=True)
