@@ -88,7 +88,20 @@ foreach ($events as $ev) {
   $ip = $_SERVER['HTTP_X_FORWARDED_FOR'] ?? $_SERVER['REMOTE_ADDR'] ?? '';
   if (!$code) {
     $base = slug_nome($first); if ($base==='') $base='AMIGA';
-    $code = $base.$cid;
+    // Padrao do cupom: <desconto><PRIMEIRONOME><sequencial 3 digitos por nome>. Ex.: 12MARIA001
+    // O prefixo do desconto (12) facilita filtrar; o sequencial por nome mantem o codigo curto e unico.
+    $prefix = ((int)$CFG['FRIEND_DISCOUNT']).$base;             // ex.: 12MARIA
+    list($gs,$gr) = yampi($CFG,'/pricing/promocodes?q='.urlencode($prefix).'&limit=100');
+    $maxn = 0;
+    foreach (($gr['data'] ?? []) as $ex) {
+      $ec = strtoupper($ex['code'] ?? '');
+      if (strpos($ec, $prefix) === 0) {
+        $suf = substr($ec, strlen($prefix));
+        if ($suf !== '' && ctype_digit($suf)) { $n = intval($suf); if ($n > $maxn) $maxn = $n; }
+      }
+    }
+    $next = $maxn + 1;
+    $code = $prefix.($next < 1000 ? str_pad((string)$next, 3, '0', STR_PAD_LEFT) : (string)$next);
     $coupon = [
       'code'=>$code,'discount_type'=>'p','value'=>(float)$CFG['FRIEND_DISCOUNT'],
       'active'=>true,'once_per_customer'=>true,'free_shipment'=>false,
@@ -125,13 +138,14 @@ foreach ($events as $ev) {
     // e-mail do cupom
     mautic($CFG,"/api/emails/{$CFG['CUPOM_EMAIL_ID']}/contact/$cid/send",[], 'POST');
     // WhatsApp: enfileira na Hetzner
-    $ready = "Gente, tô amando as pulseiras da Aurha, de proteção e feitas à mão.\n\n".
-             "Usando o meu cupom $code você ganha *{$CFG['FRIEND_DISCOUNT']}% de desconto + 15% de cashback*.\n\n".
-             "As peças são lindas e chegam numa caixinha caprichada e cheirosa, uma ótima opção de presente.\n\n".
-             "Dá uma olhada, tenho certeza que vai amar: {$CFG['HOME_URL']} 💜";
+    $ready = "Tem uma marca que eu gosto muito de comprar, a Aurha, pulseiras de proteção, e acho que você vai gostar também.\n\n".
+             "Eles me deram um cupom de {$CFG['FRIEND_DISCOUNT']}%, maior do que o que tem no site, pra eu divulgar pras pessoas que eu amo.\n\n".
+             "E tem mais: comprando com esse cupom, além dos {$CFG['FRIEND_DISCOUNT']}% você também ganha 15% de cashback.\n\n".
+             "Dá uma olhada em {$CFG['HOME_URL']}, acho que você vai gostar.\n\n".
+             "Segue o seu cupom: *$code*\nÉ só colocar na hora do pagamento 💜";
     $body = [
       'event'=>'ambassador_accepted','idempotency_key'=>"amb-$cid",
-      'contact'=>['mautic_id'=>(int)$cid,'first_name'=>$first,'whatsapp'=>$mobile],
+      'contact'=>['mautic_id'=>(int)$cid,'first_name'=>$first,'whatsapp'=>$mobile,'email'=>$email],
       'coupon'=>['code'=>$code,'discount_pct'=>(int)$CFG['FRIEND_DISCOUNT']],
       'messages'=>[
         ['seq'=>1,'template'=>'welcome_ambassador','delay_s'=>0],
