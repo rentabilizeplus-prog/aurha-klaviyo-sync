@@ -125,8 +125,9 @@ foreach ($events as $ev) {
     // e-mail do cupom
     mautic($CFG,"/api/emails/{$CFG['CUPOM_EMAIL_ID']}/contact/$cid/send",[], 'POST');
     // WhatsApp: enfileira na Hetzner
-    $ready = "Amiga, virei Embaixadora da Aurha e ganhei um presente pra dividir com quem eu amo 💜 ".
-             "Voce ganha {$CFG['FRIEND_DISCOUNT']}% OFF com o meu cupom $code em {$CFG['HOME_URL']} 🌙";
+    $ready = "Amiga, virei Embaixadora da Aurha — sabe aquelas pulseiras feitas à mão com intenção? 💜 ".
+             "E ganhei um presente pra dividir com quem eu amo: você ganha {$CFG['FRIEND_DISCOUNT']}% OFF na primeira compra ".
+             "com o meu cupom $code. É só escolher a sua em {$CFG['HOME_URL']} 🌙";
     $body = [
       'event'=>'ambassador_accepted','idempotency_key'=>"amb-$cid",
       'contact'=>['mautic_id'=>(int)$cid,'first_name'=>$first,'whatsapp'=>$mobile],
