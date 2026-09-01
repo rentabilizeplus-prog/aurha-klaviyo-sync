@@ -265,12 +265,21 @@ def main():
                 f"pessoas ALEATORIAMENTE. Encolher a base, adiar o disparo, ou "
                 f"pedir aumento de cota no SES.")
 
-        # 2. despublicada dentro da janela (so aviso -- nao mexo)
-        if dentro and (not c["publicada"] or not email.get("isPublished")):
+        # 2. despublicada (so aviso -- nao mexo).
+        # Vale tambem pra disparo que ainda vai acontecer: campanha despublicada
+        # nao dispara, e sem publishDown ela nao conta como desarmada de
+        # proposito. Se so avisasse dentro da janela, uma campanha que caisse de
+        # madrugada so apareceria depois da hora do disparo, tarde demais pra
+        # consertar.
+        if not c["publicada"] or not email.get("isPublished"):
+            quando = "esta na janela de envio" if dentro else \
+                f"dispara em {(marcado - agora).total_seconds() / 3600:.1f}h"
             problemas.append(
-                f"camp {c['id']} ({c['nome']}) esta na janela de envio mas "
+                f"DESPUBLICADA: camp {c['id']} ({c['nome']}) {quando} mas esta "
                 f"despublicada (campanha={c['publicada']}, "
-                f"e-mail={email.get('isPublished')}). Conferir se foi de proposito.")
+                f"e-mail={email.get('isPublished')}) e nao tem publishDown no "
+                f"passado. Campanha despublicada nao dispara. Se o desarme nao "
+                f"foi de proposito, republicar antes do horario.")
 
         # 3. fila parada depois do horario
         atraso = (agora - marcado).total_seconds() / 60
