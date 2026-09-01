@@ -6,6 +6,7 @@ on:
   schedule:
     - cron: '*/10 12-16 * * *'
     - cron: '*/10 21-23 * * *'
+    - cron: '25 * * * *'      # ronda de hora em hora: pega motor parado fora das janelas
   workflow_dispatch:
     inputs:
       dry_run:
@@ -35,5 +36,6 @@ jobs:
           WINDOW_HOURS: ${{ github.event.inputs.window_hours || '8' }}
           STALL_MINUTES: '45'
           STALL_REMAINING: '500'
+          ENGINE_IDLE_MINUTES: '90'
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.dry_run }}
         run: python broadcast_watchdog.py

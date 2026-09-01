@@ -49,6 +49,7 @@ PREFIXO = os.environ.get("WATCH_PREFIX", "lc")
 JANELA_HORAS = float(os.environ.get("WINDOW_HOURS", "8"))
 PACIENCIA_MIN = float(os.environ.get("STALL_MINUTES", "45"))
 RESTO_TOLERADO = int(os.environ.get("STALL_REMAINING", "500"))
+MOTOR_PARADO_MIN = float(os.environ.get("ENGINE_IDLE_MINUTES", "90"))
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "true"
 
 AUTH = base64.b64encode(f"{USER}:{PASS}".encode()).decode()
@@ -114,6 +115,14 @@ def vigiadas():
     return sorted(saida, key=lambda x: (x["marcado"] or dt.datetime.max))
 
 
+def ultimo_envio():
+    """Data/hora do envio mais recente de QUALQUER e-mail do Mautic."""
+    q = urllib.parse.urlencode(
+        {"limit": 1, "order[0][col]": "date_sent", "order[0][dir]": "DESC"})
+    linhas = api(f"stats/email_stats?{q}").get("stats") or []
+    return parse_utc(linhas[0]["date_sent"]) if linhas else None
+
+
 def main():
     agora = dt.datetime.utcnow()
     print(f"vigia de broadcast | {agora:%Y-%m-%d %H:%M} UTC | "
@@ -122,6 +131,24 @@ def main():
 
     problemas, agiu = [], []
     linhas = []
+
+    # Saude do motor, independente de campanha. Em 01/09/2026 o
+    # mautic:campaigns:trigger parou as 12:19 UTC e o Mautic ficou horas sem
+    # mandar um unico e-mail -- funis perenes junto. O rebuild continuava
+    # rodando (contato entrava na campanha), so o trigger e' que nao executava,
+    # entao olhar so a campanha nao acusava nada.
+    ult = ultimo_envio()
+    if ult is None:
+        problemas.append("nao consegui ler o ultimo envio (email_stats vazio)")
+    else:
+        parado_min = (agora - ult).total_seconds() / 60
+        linhas.append(f"  motor: ultimo envio de qualquer e-mail "
+                      f"{ult:%d/%m %H:%M} UTC ({parado_min:.0f} min atras)")
+        if parado_min > MOTOR_PARADO_MIN:
+            problemas.append(
+                f"MOTOR PARADO: nenhum e-mail saiu do Mautic ha {parado_min:.0f} min "
+                f"(ultimo {ult:%d/%m %H:%M} UTC). Nao e' a campanha: e' o "
+                f"mautic:campaigns:trigger. Olhar lock/cron no EC2.")
 
     for c in vigiadas():
         marcado = c["marcado"]
