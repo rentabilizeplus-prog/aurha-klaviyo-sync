@@ -37,6 +37,7 @@ import datetime as dt
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -123,11 +124,23 @@ def ultimo_envio():
     limit=3 trouxe linhas diferentes, e uma delas com hora futura em relacao ao
     envio real. Por `id` (auto-incremento) a leitura e' estavel -- cinco
     chamadas seguidas devolveram a mesma linha.
+
+    A consulta ordena uma tabela de milhoes de linhas e as vezes estoura o tempo
+    (visto em 01/09/2026, com o Mautic respondendo em 0,7s em todo o resto). Uma
+    falha isolada nao pode virar alarme: tenta tres vezes antes de desistir.
     """
     q = urllib.parse.urlencode(
         {"limit": 1, "order[0][col]": "id", "order[0][dir]": "DESC"})
-    linhas = api(f"stats/email_stats?{q}").get("stats") or []
-    return parse_utc(linhas[0]["date_sent"]) if linhas else None
+    for tentativa in range(3):
+        try:
+            linhas = api(f"stats/email_stats?{q}").get("stats") or []
+            return parse_utc(linhas[0]["date_sent"]) if linhas else None
+        except Exception as erro:
+            print(f"  (leitura do ultimo envio falhou, tentativa "
+                  f"{tentativa + 1}/3: {erro})")
+            if tentativa < 2:
+                time.sleep(10)
+    return False  # diferente de None: nao deu pra ler, nao e' base vazia
 
 
 def main():
@@ -145,8 +158,12 @@ def main():
     # rodando (contato entrava na campanha), so o trigger e' que nao executava,
     # entao olhar so a campanha nao acusava nada.
     ult = ultimo_envio()
-    if ult is None:
-        problemas.append("nao consegui ler o ultimo envio (email_stats vazio)")
+    if ult is False:
+        linhas.append("  motor: NAO CONSEGUI LER o ultimo envio (3 tentativas)")
+        problemas.append("nao consegui ler o ultimo envio do Mautic em 3 "
+                         "tentativas -- conferir na mao antes de confiar")
+    elif ult is None:
+        linhas.append("  motor: email_stats vazio")
     else:
         parado_min = (agora - ult).total_seconds() / 60
         linhas.append(f"  motor: ultimo envio de qualquer e-mail "
