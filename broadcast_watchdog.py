@@ -116,9 +116,16 @@ def vigiadas():
 
 
 def ultimo_envio():
-    """Data/hora do envio mais recente de QUALQUER e-mail do Mautic."""
+    """Data/hora do envio mais recente de QUALQUER e-mail do Mautic.
+
+    Ordena por `id`, nao por `date_sent`. Ordenar email_stats por date_sent
+    devolve linha errada: medido em 01/09/2026, o mesmo pedido com limit=1 e
+    limit=3 trouxe linhas diferentes, e uma delas com hora futura em relacao ao
+    envio real. Por `id` (auto-incremento) a leitura e' estavel -- cinco
+    chamadas seguidas devolveram a mesma linha.
+    """
     q = urllib.parse.urlencode(
-        {"limit": 1, "order[0][col]": "date_sent", "order[0][dir]": "DESC"})
+        {"limit": 1, "order[0][col]": "id", "order[0][dir]": "DESC"})
     linhas = api(f"stats/email_stats?{q}").get("stats") or []
     return parse_utc(linhas[0]["date_sent"]) if linhas else None
 
