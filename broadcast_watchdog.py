@@ -2,35 +2,56 @@
 """
 Vigia de entrega de broadcast do Mautic.
 
-Problema que ele resolve
-------------------------
-Na Queima de Estoque (26/08 a 01/09/2026) a fila do Mautic travou tres vezes.
-Resultado: de 7 e-mails, 2 nao sairam (0 envios) e 2 pararam com ~13 mil de
-~78 mil contatos, 19 minutos depois do horario marcado. Ninguem ficou sabendo
-ate alguem ir olhar na mao, dias depois. O e-mail de fechamento chegou a 16%
-da base no dia do fechamento.
+O QUE TRAVA OS DISPAROS (medido em 01/09/2026)
+----------------------------------------------
+A conta do Amazon SES tem teto de ~73.000 e-mails por 24 HORAS CORRIDAS (janela
+rolante, nao dia de calendario). Quando a base encosta nele, o Mautic para de
+mandar TUDO -- broadcast e funis perenes junto -- ate a janela envelhecer.
 
-O que este script faz, a cada rodada
-------------------------------------
-1. Acha as campanhas vigiadas (prefixo de nome) que estao DENTRO da janela de
-   envio: do horario marcado do evento ate +JANELA_HORAS.
-2. Se a campanha ou o e-mail dela cairam pra despublicado, republica. Campanha
-   despublicada e' o que congela os eventos agendados: eles ficam parados pra
-   sempre em vez de sair.
-3. Le quantos contatos ainda estao com o evento agendado (nao executado). Se
-   passou PACIENCIA_MIN do horario marcado e ainda sobra fila, sai com codigo 1
-   pra rodada do Actions ficar vermelha e o alerta chegar por e-mail.
+Provas, na Queima de Estoque:
 
-O que ele NAO faz, de proposito
+    travou 29/08 12:19 -> 73.466 enviados nas 24h anteriores
+    travou 01/09 12:19 -> 73.204 enviados nas 24h anteriores
+    e-mail de 28/08    -> 0 envios, 24h anteriores ja em ~73.000
+    e-mail de 31/08    -> 0 envios, 24h anteriores ja em ~72.970
+    30/08, com so 11.900 nas 24h anteriores -> mandou os 72.777 inteiros
+
+Maximo que a conta ja conseguiu numa janela de 24h: 74.859. Nunca passou disso.
+
+Resultado pratico: de 7 e-mails da campanha, 2 nao sairam e 2 entregaram ~11,5
+mil de 78 mil, com corte aleatorio. O "Hoje fecha" chegou a 16% da base no dia
+do fechamento. Ninguem soube ate alguem conferir na mao, dias depois.
+
+O QUE ESTE SCRIPT FAZ
+---------------------
+1. Compara o publico de cada disparo que esta pra sair com a cota que SOBRA na
+   janela de 24h. Avisa ANTES, enquanto ainda da pra encolher a base -- que e' a
+   checagem que teria evitado os quatro estragos acima.
+2. Avisa se o motor passou de ENGINE_IDLE_MINUTES sem mandar nenhum e-mail.
+3. Avisa se uma campanha na janela de envio esta despublicada.
+
+Falha a rodada (codigo 1) em qualquer um dos tres, pro Actions ficar vermelho e
+o alerta chegar por e-mail.
+
+O QUE ELE NAO FAZ, DE PROPOSITO
 -------------------------------
-Nao mexe em campanha fora da janela de envio. As campanhas mortas da queima
-(128, 129, 131, 132) tem ~287 mil eventos agendados vencidos parados nelas;
-republicar qualquer uma dispara e-mail vencido pra base inteira. Por isso a
-janela e' condicao pra agir, nao so pra reportar.
+Nao publica nem despublica nada. A versao anterior republicava campanha
+despublicada dentro da janela, e isso era perigoso por dois motivos:
+
+  - despublicar NAO impede o envio. Medido: as campanhas 129 e 132 estavam
+    despublicadas e mesmo assim mandaram 11.722 e 11.503 e-mails. Quem desarma
+    de verdade e' `publishDown` no passado, como o verificador_pos_lote.py do
+    repo ja registrava.
+  - campanha desarmada de proposito seria re-armada pelo vigia. Em 01/09 as
+    campanhas 132, 137 e 139 foram desarmadas justamente pra liberar cota pro
+    lancamento; re-armar qualquer uma despejaria dezenas de milhares de e-mails
+    vencidos e mataria o disparo do dia seguinte.
+
+Regra dura: campanha com `publishDown` no passado esta desarmada de proposito.
+O vigia nem reporta problema nela.
 
 Uso local:
-    MAUTIC_BASE=... MAUTIC_USER=... MAUTIC_PASS=... DRY_RUN=true \
-        python3 broadcast_watchdog.py
+    MAUTIC_BASE=... MAUTIC_USER=... MAUTIC_PASS=... python3 broadcast_watchdog.py
 """
 import base64
 import datetime as dt
@@ -47,68 +68,117 @@ USER = os.environ["MAUTIC_USER"]
 PASS = os.environ["MAUTIC_PASS"]
 
 PREFIXO = os.environ.get("WATCH_PREFIX", "lc")
+# Teto do SES por 24h corridas. 73.000 e' o numero de planejamento, nao o limite
+# nominal: os dois travamentos medidos aconteceram em 73.204 e 73.466, porque o
+# SES recusa o LOTE inteiro que cruzaria o limite, nao o e-mail exato.
+TETO_24H = int(os.environ.get("SES_DAILY_QUOTA", "73000"))
+ANTECEDENCIA_H = float(os.environ.get("LOOKAHEAD_HOURS", "6"))
+# Fatia dos matriculados que de fato recebe (o resto e' DNC: descadastro/bounce).
+ENTREGA_RATIO = float(os.environ.get("DELIVERY_RATIO", "0.924"))
 JANELA_HORAS = float(os.environ.get("WINDOW_HOURS", "8"))
 PACIENCIA_MIN = float(os.environ.get("STALL_MINUTES", "45"))
 RESTO_TOLERADO = int(os.environ.get("STALL_REMAINING", "500"))
 MOTOR_PARADO_MIN = float(os.environ.get("ENGINE_IDLE_MINUTES", "90"))
-DRY_RUN = os.environ.get("DRY_RUN", "true").lower() == "true"
 
 AUTH = base64.b64encode(f"{USER}:{PASS}".encode()).decode()
 
 
-def api(path, payload=None, method="GET"):
-    data = json.dumps(payload).encode() if payload is not None else None
+def api(path):
     req = urllib.request.Request(
-        f"{BASE}/api/{path}", data=data, method=method,
-        headers={"Authorization": "Basic " + AUTH,
-                 "Content-Type": "application/json"})
+        f"{BASE}/api/{path}", headers={"Authorization": "Basic " + AUTH})
     with urllib.request.urlopen(req, timeout=180) as r:
         return json.load(r)
 
 
+def tentar(fn, tentativas=3, espera=10):
+    """A API de stats varre tabelas de milhoes de linhas e as vezes estoura o
+    tempo, com o Mautic respondendo em 0,7s no resto. Um blip nao pode virar
+    alarme: quem le isso todo dia aprende a ignorar vermelho que mente."""
+    for i in range(tentativas):
+        try:
+            return fn()
+        except Exception as erro:
+            print(f"  (leitura falhou, tentativa {i + 1}/{tentativas}: {erro})")
+            if i < tentativas - 1:
+                time.sleep(espera)
+    return None
+
+
 def total(tabela, filtros):
     q = {"limit": 1}
-    for i, (col, val) in enumerate(filtros):
+    for i, (col, expr, val) in enumerate(filtros):
         q[f"where[{i}][col]"] = col
-        q[f"where[{i}][expr]"] = "eq"
+        q[f"where[{i}][expr]"] = expr
         q[f"where[{i}][val]"] = val
-    return api(f"stats/{tabela}?{urllib.parse.urlencode(q)}").get("total", 0)
-
-
-def eventos(campanha):
-    evs = campanha.get("events") or []
-    return list(evs.values()) if isinstance(evs, dict) else evs
+    return int(api(f"stats/{tabela}?{urllib.parse.urlencode(q)}").get("total") or 0)
 
 
 def parse_utc(txt):
     if not txt:
         return None
-    txt = txt.replace("T", " ")[:19]
-    return dt.datetime.strptime(txt, "%Y-%m-%d %H:%M:%S")
+    return dt.datetime.strptime(txt.replace("T", " ")[:19], "%Y-%m-%d %H:%M:%S")
+
+
+def usado_24h(agora):
+    """Quantos e-mails sairam na janela de 24h que termina agora."""
+    ini = (agora - dt.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    return total("email_stats", [("date_sent", "gte", ini)])
+
+
+def sobra_para(marcado):
+    """Cota disponivel para um disparo marcado para `marcado`.
+
+    Nao adianta olhar a cota de agora: o que importa e' quanto ainda estara
+    DENTRO da janela de 24h quando o envio terminar. Um disparo de 60 mil leva
+    ~2h a 550/min, entao tudo que saiu antes de (marcado - 22h) ja envelheceu e
+    nao disputa mais.
+
+    Sem isso o vigia mente: em 01/09, olhando a cota do momento (73.052 usados,
+    zero de sobra), ele acusaria "nao cabe" para o disparo do dia seguinte --
+    quando na verdade o bloco de hoje sai da janela 19 minutos depois do
+    disparo comecar e sobra a cota inteira.
+    """
+    ini = (marcado - dt.timedelta(hours=22)).strftime("%Y-%m-%d %H:%M:%S")
+    return TETO_24H - total("email_stats", [("date_sent", "gte", ini)])
+
+
+def ultimo_envio():
+    """Envio mais recente de QUALQUER e-mail.
+
+    Ordena por `id`, nao por `date_sent`. Ordenar por date_sent devolve linha
+    errada: medido em 01/09/2026, o mesmo pedido com limit=1 e limit=3 trouxe
+    linhas diferentes, e a do limit=1 vinha 40 min a frente do envio real -- o
+    vigia deu "motor saudavel" com o motor parado ha quase 3 horas.
+    """
+    q = urllib.parse.urlencode(
+        {"limit": 1, "order[0][col]": "id", "order[0][dir]": "DESC"})
+    linhas = api(f"stats/email_stats?{q}").get("stats") or []
+    return parse_utc(linhas[0]["date_sent"]) if linhas else None
 
 
 def vigiadas():
-    """Campanhas do prefixo, com o evento de envio e o horario marcado."""
-    saida = []
-    pagina = 0
+    saida, pagina = [], 0
     while True:
-        r = api(f"campaigns?limit=100&start={pagina * 100}")
-        lote = r.get("campaigns") or {}
+        lote = (api(f"campaigns?limit=100&start={pagina * 100}")
+                .get("campaigns") or {})
         if not lote:
             break
         for c in lote.values():
             if not str(c.get("name", "")).startswith(PREFIXO):
                 continue
-            evs = [e for e in eventos(c) if (e.get("properties") or {}).get("email")]
+            evs = c.get("events") or []
+            if isinstance(evs, dict):
+                evs = list(evs.values())
+            evs = [e for e in evs if (e.get("properties") or {}).get("email")]
             if len(evs) != 1:
                 continue
-            ev = evs[0]
             saida.append({
                 "id": int(c["id"]),
                 "nome": c["name"],
                 "publicada": bool(c.get("isPublished")),
-                "email_id": int(ev["properties"]["email"]),
-                "marcado": parse_utc(ev.get("triggerDate")),
+                "email_id": int(evs[0]["properties"]["email"]),
+                "marcado": parse_utc(evs[0].get("triggerDate")),
+                "desarma": parse_utc(c.get("publishDown")),
             })
         if len(lote) < 100:
             break
@@ -116,114 +186,98 @@ def vigiadas():
     return sorted(saida, key=lambda x: (x["marcado"] or dt.datetime.max))
 
 
-def ultimo_envio():
-    """Data/hora do envio mais recente de QUALQUER e-mail do Mautic.
-
-    Ordena por `id`, nao por `date_sent`. Ordenar email_stats por date_sent
-    devolve linha errada: medido em 01/09/2026, o mesmo pedido com limit=1 e
-    limit=3 trouxe linhas diferentes, e uma delas com hora futura em relacao ao
-    envio real. Por `id` (auto-incremento) a leitura e' estavel -- cinco
-    chamadas seguidas devolveram a mesma linha.
-
-    A consulta ordena uma tabela de milhoes de linhas e as vezes estoura o tempo
-    (visto em 01/09/2026, com o Mautic respondendo em 0,7s em todo o resto). Uma
-    falha isolada nao pode virar alarme: tenta tres vezes antes de desistir.
-    """
-    q = urllib.parse.urlencode(
-        {"limit": 1, "order[0][col]": "id", "order[0][dir]": "DESC"})
-    for tentativa in range(3):
-        try:
-            linhas = api(f"stats/email_stats?{q}").get("stats") or []
-            return parse_utc(linhas[0]["date_sent"]) if linhas else None
-        except Exception as erro:
-            print(f"  (leitura do ultimo envio falhou, tentativa "
-                  f"{tentativa + 1}/3: {erro})")
-            if tentativa < 2:
-                time.sleep(10)
-    return False  # diferente de None: nao deu pra ler, nao e' base vazia
-
-
 def main():
     agora = dt.datetime.utcnow()
-    print(f"vigia de broadcast | {agora:%Y-%m-%d %H:%M} UTC | "
-          f"prefixo={PREFIXO!r} janela={JANELA_HORAS}h "
-          f"paciencia={PACIENCIA_MIN}min dry_run={DRY_RUN}")
+    print(f"vigia de broadcast | {agora:%Y-%m-%d %H:%M} UTC | prefixo={PREFIXO!r} "
+          f"teto24h={TETO_24H} antecedencia={ANTECEDENCIA_H}h")
 
-    problemas, agiu = [], []
-    linhas = []
+    problemas, linhas = [], []
 
-    # Saude do motor, independente de campanha. Em 01/09/2026 o
-    # mautic:campaigns:trigger parou as 12:19 UTC e o Mautic ficou horas sem
-    # mandar um unico e-mail -- funis perenes junto. O rebuild continuava
-    # rodando (contato entrava na campanha), so o trigger e' que nao executava,
-    # entao olhar so a campanha nao acusava nada.
-    ult = ultimo_envio()
-    if ult is False:
-        linhas.append("  motor: NAO CONSEGUI LER o ultimo envio (3 tentativas)")
-        problemas.append("nao consegui ler o ultimo envio do Mautic em 3 "
-                         "tentativas -- conferir na mao antes de confiar")
-    elif ult is None:
-        linhas.append("  motor: email_stats vazio")
+    usado = tentar(lambda: usado_24h(agora))
+    ult = tentar(ultimo_envio)
+
+    if usado is None:
+        problemas.append("nao consegui ler o volume das ultimas 24h -- conferir na mao")
+        sobra = None
     else:
-        parado_min = (agora - ult).total_seconds() / 60
-        linhas.append(f"  motor: ultimo envio de qualquer e-mail "
-                      f"{ult:%d/%m %H:%M} UTC ({parado_min:.0f} min atras)")
-        if parado_min > MOTOR_PARADO_MIN:
+        sobra = TETO_24H - usado
+        linhas.append(f"  cota: {usado} enviados nas ultimas 24h, "
+                      f"sobram {sobra} de {TETO_24H}")
+
+    if ult is None:
+        problemas.append("nao consegui ler o ultimo envio -- conferir na mao")
+    else:
+        parado = (agora - ult).total_seconds() / 60
+        linhas.append(f"  motor: ultimo envio {ult:%d/%m %H:%M} UTC "
+                      f"({parado:.0f} min atras)")
+        if parado > MOTOR_PARADO_MIN:
+            # Motor parado com a cota estourada e' consequencia, nao causa nova.
+            causa = ("cota do SES estourada, volta sozinho quando a janela "
+                     "envelhecer" if sobra is not None and sobra <= 0
+                     else "NAO e' cota -- olhar cron e log no EC2")
             problemas.append(
-                f"MOTOR PARADO: nenhum e-mail saiu do Mautic ha {parado_min:.0f} min "
-                f"(ultimo {ult:%d/%m %H:%M} UTC). Nao e' a campanha: e' o "
-                f"mautic:campaigns:trigger. Olhar lock/cron no EC2.")
+                f"MOTOR PARADO ha {parado:.0f} min (ultimo {ult:%d/%m %H:%M} UTC). "
+                f"Nenhum e-mail saiu, funis perenes junto. {causa}.")
 
     for c in vigiadas():
-        marcado = c["marcado"]
+        marcado, desarma = c["marcado"], c["desarma"]
         if marcado is None:
             continue
+
+        # Desarmada de proposito: publishDown no passado. Nao reportar, nao agir.
+        if desarma is not None and desarma <= agora:
+            linhas.append(f"  camp {c['id']:<4} {c['nome']:<26} DESARMADA "
+                          f"(publishDown {desarma:%d/%m %H:%M})")
+            continue
+
         fim = marcado + dt.timedelta(hours=JANELA_HORAS)
         dentro = marcado <= agora <= fim
+        chegando = agora < marcado <= agora + dt.timedelta(hours=ANTECEDENCIA_H)
+        if not (dentro or chegando):
+            continue
 
         email = api(f"emails/{c['email_id']}")["email"]
         pendentes = total("campaign_lead_event_log",
-                          [("campaign_id", c["id"]), ("is_scheduled", 1)])
+                          [("campaign_id", "eq", c["id"]),
+                           ("is_scheduled", "eq", 1)])
+        # Nem todo matriculado recebe: descadastro e bounce tiram uma fatia
+        # estavel. Medido em 4 disparos de 2026: 61.554/66.600 e 72.777/78.794,
+        # os dois em 92,4%.
+        entrega = int(pendentes * ENTREGA_RATIO)
+        disponivel = tentar(lambda: sobra_para(marcado))
 
-        estado = "NA JANELA" if dentro else (
-            "aguardando" if agora < marcado else "encerrada")
+        estado = "NA JANELA" if dentro else "chega em breve"
         linhas.append(
-            f"  camp {c['id']:<4} {c['nome']:<22} {estado:<10} "
+            f"  camp {c['id']:<4} {c['nome']:<26} {estado:<14} "
             f"marcado={marcado:%d/%m %H:%M} pub={str(c['publicada']):<5} "
-            f"enviados={email.get('sentCount', 0):<7} agendados={pendentes}")
+            f"na fila={pendentes} (~{entrega} entregues) "
+            f"cota no disparo={disponivel if disponivel is not None else '?'}")
 
-        if not dentro:
-            continue
-
-        # 1. re-armar o que caiu
-        if not c["publicada"] or not email.get("isPublished"):
-            alvo = []
-            if not c["publicada"]:
-                alvo.append(f"campanha {c['id']}")
-            if not email.get("isPublished"):
-                alvo.append(f"e-mail {c['email_id']}")
-            aviso = f"despublicado dentro da janela: {', '.join(alvo)}"
-            if DRY_RUN:
-                print(f"  [DRY] republicaria: {aviso}")
-            else:
-                if not c["publicada"]:
-                    api(f"campaigns/{c['id']}/edit",
-                        {"isPublished": True}, method="PATCH")
-                if not email.get("isPublished"):
-                    api(f"emails/{c['email_id']}/edit",
-                        {"isPublished": True}, method="PATCH")
-                print(f"  RE-ARMADO: {aviso}")
-            agiu.append(aviso)
-            problemas.append(aviso)
-
-        # 2. fila parada
-        atraso = (agora - marcado).total_seconds() / 60
-        if atraso >= PACIENCIA_MIN and pendentes > RESTO_TOLERADO:
+        # 1. o publico cabe na cota que estara livre na hora do disparo?
+        if disponivel is None:
+            problemas.append(f"nao consegui calcular a cota do disparo da camp "
+                             f"{c['id']} -- conferir na mao")
+        elif entrega > disponivel:
             problemas.append(
-                f"campanha {c['id']} ({c['nome']}): {pendentes} contatos ainda "
-                f"agendados {atraso:.0f} min depois do horario. E-mail "
-                f"{c['email_id']} enviou {email.get('sentCount', 0)}. "
-                f"Fila do Mautic travada -- olhar cron/lock no EC2.")
+                f"NAO CABE NA COTA: camp {c['id']} ({c['nome']}) vai tentar "
+                f"entregar ~{entrega} e a cota livre no horario do disparo e' "
+                f"{disponivel}. Trava no meio e corta ~{entrega - disponivel} "
+                f"pessoas ALEATORIAMENTE. Encolher a base, adiar o disparo, ou "
+                f"pedir aumento de cota no SES.")
+
+        # 2. despublicada dentro da janela (so aviso -- nao mexo)
+        if dentro and (not c["publicada"] or not email.get("isPublished")):
+            problemas.append(
+                f"camp {c['id']} ({c['nome']}) esta na janela de envio mas "
+                f"despublicada (campanha={c['publicada']}, "
+                f"e-mail={email.get('isPublished')}). Conferir se foi de proposito.")
+
+        # 3. fila parada depois do horario
+        atraso = (agora - marcado).total_seconds() / 60
+        if dentro and atraso >= PACIENCIA_MIN and pendentes > RESTO_TOLERADO:
+            problemas.append(
+                f"FILA PARADA: camp {c['id']} ({c['nome']}) com {pendentes} "
+                f"contatos ainda na fila {atraso:.0f} min depois do horario.")
 
     print("\n".join(linhas) or "  nenhuma campanha com o prefixo")
 
@@ -241,9 +295,7 @@ def main():
         print("\nPROBLEMA:")
         for p in problemas:
             print(f"  - {p}")
-        # re-armar sozinho nao e' falha: so falha se sobrou fila parada.
-        if len(problemas) > len(agiu):
-            return 1
+        return 1
     print("\nok")
     return 0
 
