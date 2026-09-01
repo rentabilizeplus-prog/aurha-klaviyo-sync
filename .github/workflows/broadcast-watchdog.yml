@@ -1,0 +1,39 @@
+name: Vigia de entrega de broadcast (Mautic)
+
+# Roda so nas faixas de horario em que os broadcasts sao disparados:
+# 12:00 UTC (09:00 BRT) e 21:00 UTC (18:00 BRT), com folga pra cauda do envio.
+on:
+  schedule:
+    - cron: '*/10 12-16 * * *'
+    - cron: '*/10 21-23 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (so reporta, nao republica)'
+        type: choice
+        options: ['true','false']
+        default: 'true'
+      window_hours:
+        description: 'Janela de envio vigiada, em horas'
+        default: '8'
+
+jobs:
+  vigiar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Conferir campanhas na janela de envio
+        env:
+          MAUTIC_BASE: ${{ secrets.MAUTIC_BASE }}
+          MAUTIC_USER: ${{ secrets.MAUTIC_USER }}
+          MAUTIC_PASS: ${{ secrets.MAUTIC_PASS }}
+          WATCH_PREFIX: 'lc'
+          WINDOW_HOURS: ${{ github.event.inputs.window_hours || '8' }}
+          STALL_MINUTES: '45'
+          STALL_REMAINING: '500'
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || github.event.inputs.dry_run }}
+        run: python broadcast_watchdog.py
