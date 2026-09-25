@@ -32,9 +32,21 @@ today=datetime.date.today()
 add_md=(today+datetime.timedelta(days=LEAD)).strftime("%m-%d")
 rem_md=(today-datetime.timedelta(days=GRACE)).strftime("%m-%d")
 print(f"[birthday] today={today} add_md={add_md} rem_md={rem_md} seg={SEG} dry={DRY}",flush=True)
+# 25/09/2026: limit=1000 estourava os 128 MB do PHP-FPM (OutOfMemoryError) e o job falhou de 17/07 a 25/09.
+PAGE=int(os.environ.get("PAGE_SIZE","200"))
+def janela(md):
+    """dias ate o proximo aniversario (negativo = ja passou, ate -GRACE)."""
+    y=today.year
+    for ano in (y-1,y,y+1):
+        try: d=datetime.date(ano,int(md[:2]),int(md[3:5]))
+        except ValueError: d=datetime.date(ano,3,1)  # 29/02 em ano nao bissexto
+        delta=(d-today).days
+        if -GRACE<delta<=LEAD: return delta
+    return None
+dob={}
 add_ids=[]; rem_ids=[]; start=0; total=None; scanned=0; withdob=0
 while True:
-    d=http(f"{MBASE}/api/contacts?search=segment:{HELPER}&limit=1000&start={start}&minimal=false")
+    d=http(f"{MBASE}/api/contacts?search=segment:{HELPER}&limit={PAGE}&start={start}&minimal=false")
     if total is None: total=int(d.get("total") or 0); print(f"[birthday] contatos c/ data (seg {HELPER})={total}",flush=True)
     cs=d.get("contacts",{}); cs=list(cs.values()) if isinstance(cs,dict) else cs
     if not cs: break
@@ -42,11 +54,21 @@ while True:
         scanned+=1
         v=(((c.get("fields") or {}).get("all") or {}).get("data_nascimento"))
         if not v or len(str(v))<10: continue
-        withdob+=1; md=str(v)[5:10]
+        withdob+=1; md=str(v)[5:10]; dob[c["id"]]=md
         if md==add_md: add_ids.append(c["id"])
         elif md==rem_md: rem_ids.append(c["id"])
     start+=len(cs)
     if total and start>=total: break
+# Limpeza: quem esta no segmento fora da janela (ficou preso quando o job parou) sai, senao nunca reentra.
+start=0
+while True:
+    d=http(f"{MBASE}/api/contacts?search=segment:f3-aniversariantes-janela&limit={PAGE}&start={start}&minimal=true")
+    cs=d.get("contacts",{}); cs=list(cs.values()) if isinstance(cs,dict) else cs
+    if not cs: break
+    for c in cs:
+        md=dob.get(c["id"])
+        if (md is None or janela(md) is None) and c["id"] not in rem_ids: rem_ids.append(c["id"])
+    start+=len(cs)
 print(f"[birthday] scanned={scanned} com_data={withdob} add={len(add_ids)} remove={len(rem_ids)}",flush=True)
 if DRY:
     print("[birthday] DRY RUN - nada alterado",flush=True)
